@@ -753,7 +753,7 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
               view.getId(),
               createWebViewEvent(view, url)
             )
-          )      
+          );     
       }
 
       return true;
