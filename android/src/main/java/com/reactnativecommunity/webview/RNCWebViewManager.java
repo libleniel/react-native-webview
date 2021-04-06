@@ -6,6 +6,7 @@ import android.app.DownloadManager;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.Manifest;
@@ -84,12 +85,14 @@ import org.json.JSONObject;
 
 import java.io.UnsupportedEncodingException;
 import java.net.MalformedURLException;
+import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -820,50 +823,56 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
 
     @Override
     public boolean shouldOverrideUrlLoading(WebView view, String url) {
-      final RNCWebView rncWebView = (RNCWebView) view;
-      final boolean isJsDebugging = ((ReactContext) view.getContext()).getJavaScriptContextHolder().get() == 0;
+	  Uri uri = Uri.parse(url);
 
-      if (!isJsDebugging && rncWebView.mCatalystInstance != null) {
-        final Pair<Integer, AtomicReference<ShouldOverrideCallbackState>> lock = RNCWebViewModule.shouldOverrideUrlLoadingLock.getNewLock();
-        final int lockIdentifier = lock.first;
-        final AtomicReference<ShouldOverrideCallbackState> lockObject = lock.second;
+      if (!openWithSingpassMobile(uri, view)) {
+       	final RNCWebView rncWebView = (RNCWebView) view;
+     	final boolean isJsDebugging = ((ReactContext) view.getContext()).getJavaScriptContextHolder().get() == 0;
 
-        final WritableMap event = createWebViewEvent(view, url);
-        event.putInt("lockIdentifier", lockIdentifier);
-        rncWebView.sendDirectMessage("onShouldStartLoadWithRequest", event);
+		if (!isJsDebugging && rncWebView.mCatalystInstance != null) {
+			final Pair<Integer, AtomicReference<ShouldOverrideCallbackState>> lock = RNCWebViewModule.shouldOverrideUrlLoadingLock.getNewLock();
+			final int lockIdentifier = lock.first;
+			final AtomicReference<ShouldOverrideCallbackState> lockObject = lock.second;
 
-        try {
-          assert lockObject != null;
-          synchronized (lockObject) {
-            final long startTime = SystemClock.elapsedRealtime();
-            while (lockObject.get() == ShouldOverrideCallbackState.UNDECIDED) {
-              if (SystemClock.elapsedRealtime() - startTime > SHOULD_OVERRIDE_URL_LOADING_TIMEOUT) {
-                FLog.w(TAG, "Did not receive response to shouldOverrideUrlLoading in time, defaulting to allow loading.");
-                RNCWebViewModule.shouldOverrideUrlLoadingLock.removeLock(lockIdentifier);
-                return false;
-              }
-              lockObject.wait(SHOULD_OVERRIDE_URL_LOADING_TIMEOUT);
-            }
-          }
-        } catch (InterruptedException e) {
-          FLog.e(TAG, "shouldOverrideUrlLoading was interrupted while waiting for result.", e);
-          RNCWebViewModule.shouldOverrideUrlLoadingLock.removeLock(lockIdentifier);
-          return false;
-        }
+			final WritableMap event = createWebViewEvent(view, url);
+			event.putInt("lockIdentifier", lockIdentifier);
+			rncWebView.sendDirectMessage("onShouldStartLoadWithRequest", event);
 
-        final boolean shouldOverride = lockObject.get() == ShouldOverrideCallbackState.SHOULD_OVERRIDE;
-        RNCWebViewModule.shouldOverrideUrlLoadingLock.removeLock(lockIdentifier);
+			try {
+			  assert lockObject != null;
+			  synchronized (lockObject) {
+			    final long startTime = SystemClock.elapsedRealtime();
+			    while (lockObject.get() == ShouldOverrideCallbackState.UNDECIDED) {
+			      if (SystemClock.elapsedRealtime() - startTime > SHOULD_OVERRIDE_URL_LOADING_TIMEOUT) {
+			        FLog.w(TAG, "Did not receive response to shouldOverrideUrlLoading in time, defaulting to allow loading.");
+			        RNCWebViewModule.shouldOverrideUrlLoadingLock.removeLock(lockIdentifier);
+			        return false;
+			      }
+			      lockObject.wait(SHOULD_OVERRIDE_URL_LOADING_TIMEOUT);
+			    }
+			  }
+			} catch (InterruptedException e) {
+			  FLog.e(TAG, "shouldOverrideUrlLoading was interrupted while waiting for result.", e);
+			  RNCWebViewModule.shouldOverrideUrlLoadingLock.removeLock(lockIdentifier);
+			  return false;
+			}
 
-        return shouldOverride;
-      } else {
-        FLog.w(TAG, "Couldn't use blocking synchronous call for onShouldStartLoadWithRequest due to debugging or missing Catalyst instance, falling back to old event-and-load.");
-        progressChangedFilter.setWaitingForCommandLoadUrl(true);
-        dispatchEvent(
-          view,
-          new TopShouldStartLoadWithRequestEvent(
-            view.getId(),
-            createWebViewEvent(view, url)));
-        return true;
+			final boolean shouldOverride = lockObject.get() == ShouldOverrideCallbackState.SHOULD_OVERRIDE;
+			RNCWebViewModule.shouldOverrideUrlLoadingLock.removeLock(lockIdentifier);
+
+			return shouldOverride;
+		} else {
+			FLog.w(TAG, "Couldn't use blocking synchronous call for onShouldStartLoadWithRequest due to debugging or missing Catalyst instance, falling back to old event-and-load.");
+			progressChangedFilter.setWaitingForCommandLoadUrl(true);
+			dispatchEvent(
+			  view,
+			  new TopShouldStartLoadWithRequestEvent(
+			    view.getId(),
+			    createWebViewEvent(view, url))
+		    );
+
+			return true;
+		}    
       }
     }
 
@@ -873,6 +882,85 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
       final String url = request.getUrl().toString();
       return this.shouldOverrideUrlLoading(view, url);
     }
+
+    private boolean openWithSingpassMobile(Uri uri, WebView view) {
+		if (
+		       // (Scheme == https or intent)
+		     (
+		         uri.getScheme().equalsIgnoreCase("intent") ||
+		         uri.getScheme().equalsIgnoreCase("https")
+		     ) &&
+		     // AND
+		     // (Host == singpassmobile.sg or www.singpassmobile.sg AND path == qrlogin)
+		     (
+		         (
+		             uri.getHost().equalsIgnoreCase("singpassmobile.sg") ||
+		             uri.getHost().equalsIgnoreCase("www.singpassmobile.sg")
+		         ) &&
+		         uri.getPath().contains("qrlogin")
+		     )
+		) {
+		   Context context = view.getContext();
+		   PackageManager packageManager = context.getPackageManager();
+		   // Singpass Mobile Chrome intent scheme
+		   if (uri.getScheme().equalsIgnoreCase("intent")) {
+		       // Try to parse Singpass Mobile chrome intent URL to get an intent
+		       try {
+		           Intent intent = Intent.parseUri(uri.toString(), Intent.URI_INTENT_SCHEME);
+		           // Try to find activity that can handle Singpass Mobile chrome intent
+		           ResolveInfo info = packageManager.resolveActivity(intent, 0);
+		           // Singpass Mobile activity found, launch Singpass Mobile
+		           if (info != null) {
+		               context.startActivity(intent);
+		           }
+		           // Singpass Mobile not installed on device, load fallback URL from chrome intent
+		           else {
+		               String fallbackUrl = intent.getStringExtra("browser_fallback_url");
+		               view.loadUrl(fallbackUrl);
+		           }
+		       }
+		       // Uri parse exception, try to load Singpass Mobile landing page in webview
+		       catch (URISyntaxException e) {
+		           view.loadUrl("https://singpassmobile.sg/qrlogin");
+		       }
+		   }
+		   // Https scheme, for app link
+		   else {
+		       Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+		       // Check if there are activities that can handle
+		       if (packageManager.resolveActivity(intent, 0) != null) {
+		             List < ResolveInfo > list = packageManager.queryIntentActivities(intent,
+		                     0);
+		             boolean spmInstalled = false;
+		             // Iterate handler activties and filter out SingPass Mobile
+		             for (ResolveInfo info: list) {
+		                 if (info.activityInfo.packageName.equalsIgnoreCase("sg.ndi.sp")) {
+		                         spmInstalled = true;
+		                         break;
+		                 }
+		             }
+		             // If Singpass Mobile found, launch it
+		             if (spmInstalled) {
+		                 intent.setPackage("sg.ndi.sp");
+		                 context.startActivity(intent);
+		             }
+		             // If Singpass Mobile not found, load Url in webview
+		             else {
+		               view.loadUrl("https://singpassmobile.sg/qrlogin");
+		             }
+		       }
+		       // If no activities can handle URL, load it in webview
+		       else {
+		             view.loadUrl("https://singpassmobile.sg/qrlogin");
+		       }
+		   }
+		   // Return true if this function handled the URL
+		   return true;
+		}
+
+		// Return false if URL has not been handled
+		return false;
+	}
 
     @Override
     public void onReceivedSslError(final WebView webView, final SslErrorHandler handler, final SslError error) {
